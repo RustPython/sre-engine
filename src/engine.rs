@@ -102,24 +102,41 @@ impl<'a> State<'a> {
         self.marks_stack.pop();
     }
 
-    fn _match(mut self, dispatcher: &mut OpcodeDispatcher) -> Self {
-        let mut has_matched = None;
+    fn _match(mut self) -> Self {
+        while let Some(ctx) = self.context_stack.pop() {
+            let mut drive = MatchContextDrive {
+                state: self,
+                ctx,
+                next_ctx: None,
+            };
 
-        loop {
-            if self.context_stack.is_empty() {
-                break;
+            if let Some(handler) = drive.ctx.handler {
+                handler(&mut drive);
+            } else if drive.remaining_codes() > 0 {
+                let code = drive.peek_code(0);
+                let code = SreOpcode::try_from(code).unwrap();
+                dispatch(code, &mut drive);
+            } else {
+                drive.ctx.has_matched = Some(false);
             }
-            let ctx_id = self.context_stack.len() - 1;
-            let mut drive = StackDrive::drive(ctx_id, self);
 
-            has_matched = dispatcher.pymatch(&mut drive);
-            self = drive.take();
-            if has_matched.is_some() {
-                self.popped_context = self.context_stack.pop();
+            let MatchContextDrive {
+                state,
+                ctx,
+                next_ctx,
+            } = drive;
+
+            if ctx.has_matched.is_some() {
+                state.popped_context = Some(ctx);
+            } else {
+                state.context_stack.push(ctx);
+                if let Some(next_ctx) = next_ctx {
+                    state.context_stack.push(next_ctx);
+                }
             }
+            self = state;
         }
-
-        self.has_matched = has_matched == Some(true);
+        self.has_matched = self.popped_context.unwrap().has_matched == Some(true);
         self
     }
 
@@ -130,12 +147,11 @@ impl<'a> State<'a> {
             code_position: 0,
             has_matched: None,
             toplevel: true,
+            handler: None,
         };
         self.context_stack.push(ctx);
 
-        let mut dispatcher = OpcodeDispatcher::new();
-
-        self._match(&mut dispatcher)
+        self._match()
     }
 
     pub fn search(mut self) -> Self {
@@ -145,8 +161,6 @@ impl<'a> State<'a> {
             return self;
         }
 
-        let mut dispatcher = OpcodeDispatcher::new();
-
         let mut start_offset = self.string.offset(0, self.start);
 
         let ctx = MatchContext {
@@ -155,30 +169,137 @@ impl<'a> State<'a> {
             code_position: 0,
             has_matched: None,
             toplevel: true,
+            handler: None,
         };
         self.context_stack.push(ctx);
-        self = self._match(&mut dispatcher);
+        self = self._match();
 
         self.must_advance = false;
         while !self.has_matched && self.start < self.end {
             self.start += 1;
             start_offset = self.string.offset(start_offset, 1);
             self.reset();
-            dispatcher.clear();
+
             let ctx = MatchContext {
                 string_position: self.start,
                 string_offset: start_offset,
                 code_position: 0,
                 has_matched: None,
                 toplevel: false,
+                handler: None,
             };
             self.context_stack.push(ctx);
-            self = self._match(&mut dispatcher);
+            self = self._match();
         }
 
         self
     }
 }
+
+fn dispatch(opcode: SreOpcode, drive: &mut MatchContextDrive) {
+    match opcode {
+        SreOpcode::FAILURE => {
+            drive.failure();
+        }
+        SreOpcode::SUCCESS => {
+            drive.ctx.has_matched = Some(drive.can_success());
+            if drive.ctx.has_matched == Some(true) {
+                drive.state.string_position = drive.ctx.string_position;
+            }
+        }
+        SreOpcode::ANY => {
+            if drive.at_end() || drive.at_linebreak() {
+                drive.failure();
+            } else {
+                drive.skip_code(1);
+                drive.skip_char(1);
+            }
+        }
+        SreOpcode::ANY_ALL => {
+            if drive.at_end() {
+                drive.failure();
+            } else {
+                drive.skip_code(1);
+                drive.skip_char(1);
+            }
+        }
+        SreOpcode::ASSERT => op_assert(drive),
+
+        SreOpcode::ASSERT_NOT => todo!(),
+        SreOpcode::AT => todo!(),
+        SreOpcode::BRANCH => todo!(),
+        SreOpcode::CALL => todo!(),
+        SreOpcode::CATEGORY => todo!(),
+        SreOpcode::CHARSET => todo!(),
+        SreOpcode::BIGCHARSET => todo!(),
+        SreOpcode::GROUPREF => todo!(),
+        SreOpcode::GROUPREF_EXISTS => todo!(),
+        SreOpcode::IN => todo!(),
+        SreOpcode::INFO => todo!(),
+        SreOpcode::JUMP => todo!(),
+        SreOpcode::LITERAL => todo!(),
+        SreOpcode::MARK => todo!(),
+        SreOpcode::MAX_UNTIL => todo!(),
+        SreOpcode::MIN_UNTIL => todo!(),
+        SreOpcode::NOT_LITERAL => todo!(),
+        SreOpcode::NEGATE => todo!(),
+        SreOpcode::RANGE => todo!(),
+        SreOpcode::REPEAT => todo!(),
+        SreOpcode::REPEAT_ONE => todo!(),
+        SreOpcode::SUBPATTERN => todo!(),
+        SreOpcode::MIN_REPEAT_ONE => todo!(),
+        SreOpcode::GROUPREF_IGNORE => todo!(),
+        SreOpcode::IN_IGNORE => todo!(),
+        SreOpcode::LITERAL_IGNORE => todo!(),
+        SreOpcode::NOT_LITERAL_IGNORE => todo!(),
+        SreOpcode::GROUPREF_LOC_IGNORE => todo!(),
+        SreOpcode::IN_LOC_IGNORE => todo!(),
+        SreOpcode::LITERAL_LOC_IGNORE => todo!(),
+        SreOpcode::NOT_LITERAL_LOC_IGNORE => todo!(),
+        SreOpcode::GROUPREF_UNI_IGNORE => todo!(),
+        SreOpcode::IN_UNI_IGNORE => todo!(),
+        SreOpcode::LITERAL_UNI_IGNORE => todo!(),
+        SreOpcode::NOT_LITERAL_UNI_IGNORE => todo!(),
+        SreOpcode::RANGE_UNI_IGNORE => todo!(),
+    }
+}
+
+/* assert subpattern */
+/* <ASSERT> <skip> <back> <pattern> */
+fn op_assert(drive: &mut MatchContextDrive) {
+    let back = drive.peek_code(2) as usize;
+    if drive.ctx.string_position < back {
+        return drive.failure();
+    }
+    let back_offset = drive
+        .state
+        .string
+        .back_offset(drive.ctx.string_offset, back);
+
+    drive.state.string_position = drive.ctx.string_position - back;
+
+    drive.next_ctx(MatchContext {
+        string_position: drive.ctx.string_position - back,
+        string_offset: drive.ctx.string_offset - back_offset,
+        code_position: drive.ctx.code_position + 3,
+        has_matched: None,
+        toplevel: false,
+        handler: None,
+    });
+
+    drive.ctx.handler = Some(|drive| {
+        let child_ctx = drive.popped_ctx();
+        if child_ctx.has_matched == Some(true) {
+            drive.skip_code_from(1);
+        } else {
+            drive.failure();
+        }
+    });
+}
+
+/* assert not subpattern */
+/* <ASSERT_NOT> <skip> <back> <pattern> */
+fn op_assert_not(drive: &mut MatchContextDrive) {}
 
 #[derive(Debug, Clone, Copy)]
 pub enum StrDrive<'a> {
@@ -264,53 +385,78 @@ impl<'a> StrDrive<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct MatchContext {
     string_position: usize,
     string_offset: usize,
     code_position: usize,
     has_matched: Option<bool>,
     toplevel: bool,
+    handler: Option<OpcodeHandler>,
 }
 
-trait MatchContextDrive {
-    fn ctx_mut(&mut self) -> &mut MatchContext;
-    fn ctx(&self) -> &MatchContext;
-    fn state(&self) -> &State;
+impl std::fmt::Debug for MatchContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MatchContext")
+            .field("string_position", &self.string_position)
+            .field("string_offset", &self.string_offset)
+            .field("code_position", &self.code_position)
+            .field("has_matched", &self.has_matched)
+            .field("toplevel", &self.toplevel)
+            .field("handler", &self.handler.map(|x| x as usize))
+            .finish()
+    }
+}
+
+type OpcodeHandler = fn(&mut MatchContextDrive);
+
+struct MatchContextDrive<'a> {
+    state: State<'a>,
+    ctx: MatchContext,
+    next_ctx: Option<MatchContext>,
+}
+
+impl<'a> MatchContextDrive<'a> {
     fn repeat_ctx(&self) -> &RepeatContext {
-        self.state().repeat_stack.last().unwrap()
+        self.state.repeat_stack.last().unwrap()
+    }
+    fn repeat_ctx_mut(&mut self) -> &mut RepeatContext {
+        self.state.repeat_stack.last_mut().unwrap()
+    }
+    fn popped_ctx(&self) -> &MatchContext {
+        self.state.popped_context.as_ref().unwrap()
     }
     fn pattern(&self) -> &[u32] {
-        &self.state().pattern_codes[self.ctx().code_position..]
+        &self.state.pattern_codes[self.ctx.code_position..]
     }
     fn peek_char(&self) -> u32 {
-        self.state().string.peek(self.ctx().string_offset)
+        self.state.string.peek(self.ctx.string_offset)
     }
     fn peek_code(&self, peek: usize) -> u32 {
-        self.state().pattern_codes[self.ctx().code_position + peek]
+        self.state.pattern_codes[self.ctx.code_position + peek]
     }
     fn skip_char(&mut self, skip_count: usize) {
-        self.ctx_mut().string_offset = self
-            .state()
-            .string
-            .offset(self.ctx().string_offset, skip_count);
-        self.ctx_mut().string_position += skip_count;
+        self.ctx.string_offset = self.state.string.offset(self.ctx.string_offset, skip_count);
+        self.ctx.string_position += skip_count;
     }
     fn skip_code(&mut self, skip_count: usize) {
-        self.ctx_mut().code_position += skip_count;
+        self.ctx.code_position += skip_count;
+    }
+    fn skip_code_from(&mut self, peek: usize) {
+        self.skip_code(self.peek_code(peek) as usize + 1);
     }
     fn remaining_chars(&self) -> usize {
-        self.state().end - self.ctx().string_position
+        self.state.end - self.ctx.string_position
     }
     fn remaining_codes(&self) -> usize {
-        self.state().pattern_codes.len() - self.ctx().code_position
+        self.state.pattern_codes.len() - self.ctx.code_position
     }
     fn at_beginning(&self) -> bool {
         // self.ctx().string_position == self.state().start
-        self.ctx().string_position == 0
+        self.ctx.string_position == 0
     }
     fn at_end(&self) -> bool {
-        self.ctx().string_position == self.state().end
+        self.ctx.string_position == self.state.end
     }
     fn at_linebreak(&self) -> bool {
         !self.at_end() && is_linebreak(self.peek_char())
@@ -332,85 +478,32 @@ trait MatchContextDrive {
         this == that
     }
     fn back_peek_char(&self) -> u32 {
-        self.state().string.back_peek(self.ctx().string_offset)
+        self.state.string.back_peek(self.ctx.string_offset)
     }
     fn back_skip_char(&mut self, skip_count: usize) {
-        self.ctx_mut().string_position -= skip_count;
-        self.ctx_mut().string_offset = self
-            .state()
+        self.ctx.string_position -= skip_count;
+        self.ctx.string_offset = self
+            .state
             .string
-            .back_offset(self.ctx().string_offset, skip_count);
+            .back_offset(self.ctx.string_offset, skip_count);
     }
     fn can_success(&self) -> bool {
-        if !self.ctx().toplevel {
+        if !self.ctx.toplevel {
             return true;
         }
-        if self.state().match_all && !self.at_end() {
+        if self.state.match_all && !self.at_end() {
             return false;
         }
-        if self.state().must_advance && self.ctx().string_position == self.state().start {
+        if self.state.must_advance && self.ctx.string_position == self.state.start {
             return false;
         }
         true
     }
-}
-
-struct StackDrive<'a> {
-    state: State<'a>,
-    ctx_id: usize,
-}
-impl<'a> StackDrive<'a> {
-    fn id(&self) -> usize {
-        self.ctx_id
+    fn next_ctx(&mut self, next_ctx: MatchContext) {
+        self.next_ctx = Some(next_ctx);
     }
-    fn drive(ctx_id: usize, state: State<'a>) -> Self {
-        Self { state, ctx_id }
-    }
-    fn take(self) -> State<'a> {
-        self.state
-    }
-    fn push_new_context(&mut self, pattern_offset: usize) {
-        self.push_new_context_at(self.ctx().code_position + pattern_offset);
-    }
-    fn push_new_context_at(&mut self, code_position: usize) {
-        let mut child_ctx = MatchContext { ..*self.ctx() };
-        child_ctx.code_position = code_position;
-        self.state.context_stack.push(child_ctx);
-    }
-    fn repeat_ctx_mut(&mut self) -> &mut RepeatContext {
-        self.state.repeat_stack.last_mut().unwrap()
-    }
-}
-impl MatchContextDrive for StackDrive<'_> {
-    fn ctx_mut(&mut self) -> &mut MatchContext {
-        &mut self.state.context_stack[self.ctx_id]
-    }
-    fn ctx(&self) -> &MatchContext {
-        &self.state.context_stack[self.ctx_id]
-    }
-    fn state(&self) -> &State {
-        &self.state
-    }
-}
-
-struct WrapDrive<'a> {
-    stack_drive: &'a StackDrive<'a>,
-    ctx: MatchContext,
-}
-impl<'a> WrapDrive<'a> {
-    fn drive(ctx: MatchContext, stack_drive: &'a StackDrive<'a>) -> Self {
-        Self { stack_drive, ctx }
-    }
-}
-impl MatchContextDrive for WrapDrive<'_> {
-    fn ctx_mut(&mut self) -> &mut MatchContext {
-        &mut self.ctx
-    }
-    fn ctx(&self) -> &MatchContext {
-        &self.ctx
-    }
-    fn state(&self) -> &State {
-        self.stack_drive.state()
+    fn failure(&mut self) {
+        self.ctx.has_matched = Some(false);
     }
 }
 
