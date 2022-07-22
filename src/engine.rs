@@ -61,7 +61,9 @@ impl<'a> State<'a> {
         self.marks.clear();
         self.marks_stack.clear();
         self.context_stack.clear();
-        self._stacks.as_mut().map(|x| x.clear());
+        if let Some(x) = self._stacks.as_mut() {
+            x.clear()
+        };
         self.string_position = self.start;
         self.popped_context = None;
         self.has_matched = false;
@@ -382,8 +384,8 @@ fn op_branch(drive: &mut StateContext, stacks: &mut Stacks) {
 
         drive.sync_string_position();
 
-        drive.next_ctx(branch_offset + 1, callback);
         stacks.branch_last().branch_offset += next_length;
+        drive.next_ctx(branch_offset + 1, callback);
     }
 
     fn callback(drive: &mut StateContext, stacks: &mut Stacks) {
@@ -629,7 +631,7 @@ fn op_min_until(drive: &mut StateContext, stacks: &mut Stacks) {
     if (count as usize) < repeat_ctx.min_count {
         // not enough matches
         repeat_ctx.count = count;
-        drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
+        return drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
             if drive.popped_ctx().has_matched == Some(true) {
                 stacks.min_until.pop();
                 return drive.success();
@@ -640,7 +642,6 @@ fn op_min_until(drive: &mut StateContext, stacks: &mut Stacks) {
             stacks.min_until.pop();
             drive.failure();
         });
-        return;
     }
 
     drive.state.marks_push();
@@ -650,10 +651,11 @@ fn op_min_until(drive: &mut StateContext, stacks: &mut Stacks) {
 
     drive.next_ctx(1, |drive, stacks| {
         let MinUntilContext {
-            mut count,
+            count,
             save_repeat_ctx,
             save_last_position,
         } = stacks.min_until_last();
+        let count = *count;
 
         let mut repeat_ctx = save_repeat_ctx.take().unwrap();
 
@@ -717,7 +719,7 @@ fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
     if (count as usize) < repeat_ctx.min_count {
         // not enough matches
         repeat_ctx.count = count;
-        drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
+        return drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
             if drive.popped_ctx().has_matched == Some(true) {
                 // stacks.max_until.pop();
                 drive.success();
@@ -729,7 +731,6 @@ fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
                 drive.failure();
             }
         });
-        return;
     }
 
     drive.state.marks_push();
@@ -746,7 +747,7 @@ fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
         });
         repeat_ctx.last_position = drive.state.string_position;
 
-        drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
+        return drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
             let save_last_position = stacks.max_until_last().save_last_position;
             stacks.repeat_last().last_position = save_last_position;
             if drive.popped_ctx().has_matched == Some(true) {
@@ -761,11 +762,10 @@ fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
 
             drive.next_ctx(1, tail_callback);
         });
-        return;
     }
-    drive.next_ctx(1, tail_callback);
+    return drive.next_ctx(1, tail_callback);
 
-    fn tail_callback(drive: &mut StateContext, stacks: &mut Stacks) {
+    fn tail_callback(drive: &mut StateContext, _stacks: &mut Stacks) {
         /* cannot match more repeated items here.  make sure the
         tail matches */
         if drive.popped_ctx().has_matched == Some(true) {
@@ -776,7 +776,6 @@ fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
             drive.failure();
         }
     }
-
 }
 
 #[derive(Debug, Default)]
@@ -1048,15 +1047,12 @@ impl ContextDrive for StateContext<'_> {
 }
 
 impl StateContext<'_> {
-    #[must_use]
     fn next_ctx_from(&mut self, peek: usize, handler: OpcodeHandler) {
         self.next_ctx(self.peek_code(peek) as usize + 1, handler);
     }
-    #[must_use]
     fn next_ctx(&mut self, offset: usize, handler: OpcodeHandler) {
         self.next_ctx_at(self.ctx.code_position + offset, handler);
     }
-    #[must_use]
     fn next_ctx_at(&mut self, code_position: usize, handler: OpcodeHandler) {
         self.next_ctx = Some(MatchContext {
             code_position,
