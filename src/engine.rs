@@ -154,7 +154,9 @@ impl<'a> State<'a> {
         };
         self.context_stack.push(ctx);
 
-        self._match(&mut stacks)
+        self = self._match(&mut stacks);
+        self._stacks = Some(stacks);
+        self
     }
 
     pub fn search(mut self) -> Self {
@@ -183,6 +185,7 @@ impl<'a> State<'a> {
             self.start += 1;
             start_offset = self.string.offset(start_offset, 1);
             self.reset();
+            stacks.clear();
 
             let ctx = MatchContext {
                 string_position: self.start,
@@ -195,6 +198,8 @@ impl<'a> State<'a> {
             self.context_stack.push(ctx);
             self = self._match(&mut stacks);
         }
+
+        self._stacks = Some(stacks);
         self
     }
 }
