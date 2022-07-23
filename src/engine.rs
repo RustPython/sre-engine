@@ -304,26 +304,20 @@ fn dispatch(opcode: SreOpcode, drive: &mut StateContext, stacks: &mut Stacks) {
 /* <ASSERT> <skip> <back> <pattern> */
 fn op_assert(drive: &mut StateContext) {
     let back = drive.peek_code(2) as usize;
+
     if drive.ctx.string_position < back {
         return drive.failure();
     }
-    let back_offset = drive
+
+    let offset = drive
         .state
         .string
         .back_offset(drive.ctx.string_offset, back);
+    let position = drive.ctx.string_position - back;
 
-    drive.state.string_position = drive.ctx.string_position - back;
+    drive.state.string_position = position;
 
-    drive.next_ctx = Some(MatchContext {
-        string_position: drive.ctx.string_position - back,
-        string_offset: back_offset,
-        code_position: drive.ctx.code_position + 3,
-        has_matched: None,
-        toplevel: false,
-        handler: None,
-    });
-
-    drive.ctx.handler = Some(|drive, _| {
+    let next_ctx = drive.next_ctx(3, |drive, _| {
         if drive.popped_ctx().has_matched == Some(true) {
             drive.ctx.handler = None;
             drive.skip_code_from(1);
@@ -331,39 +325,39 @@ fn op_assert(drive: &mut StateContext) {
             drive.failure();
         }
     });
+    next_ctx.string_position = position;
+    next_ctx.string_offset = offset;
+    next_ctx.toplevel = false;
 }
 
 /* assert not subpattern */
 /* <ASSERT_NOT> <skip> <back> <pattern> */
 fn op_assert_not(drive: &mut StateContext) {
     let back = drive.peek_code(2) as usize;
+
     if drive.ctx.string_position < back {
         return drive.skip_code_from(1);
     }
-    let back_offset = drive
+
+    let offset = drive
         .state
         .string
         .back_offset(drive.ctx.string_offset, back);
+    let position = drive.ctx.string_position - back;
 
-    drive.state.string_position = drive.ctx.string_position - back;
+    drive.state.string_position = position;
 
-    drive.next_ctx = Some(MatchContext {
-        string_position: drive.ctx.string_position - back,
-        string_offset: back_offset,
-        code_position: drive.ctx.code_position + 3,
-        has_matched: None,
-        toplevel: false,
-        handler: None,
-    });
-
-    drive.ctx.handler = Some(|drive, _| {
+    let next_ctx = drive.next_ctx(3, |drive, _| {
         if drive.popped_ctx().has_matched == Some(true) {
             drive.failure();
         } else {
             drive.ctx.handler = None;
             drive.skip_code_from(1);
         }
-    })
+    });
+    next_ctx.string_position = position;
+    next_ctx.string_offset = offset;
+    next_ctx.toplevel = false;
 }
 
 #[derive(Debug)]
@@ -636,7 +630,7 @@ fn op_min_until(drive: &mut StateContext, stacks: &mut Stacks) {
     if (count as usize) < repeat_ctx.min_count {
         // not enough matches
         repeat_ctx.count = count;
-        return drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
+        drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
             if drive.popped_ctx().has_matched == Some(true) {
                 stacks.min_until.pop();
                 return drive.success();
@@ -647,6 +641,7 @@ fn op_min_until(drive: &mut StateContext, stacks: &mut Stacks) {
             stacks.min_until.pop();
             drive.failure();
         });
+        return;
     }
 
     drive.state.marks_push();
@@ -724,7 +719,7 @@ fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
     if (count as usize) < repeat_ctx.min_count {
         // not enough matches
         repeat_ctx.count = count;
-        return drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
+        drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
             if drive.popped_ctx().has_matched == Some(true) {
                 // stacks.max_until.pop();
                 drive.success();
@@ -736,6 +731,7 @@ fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
                 drive.failure();
             }
         });
+        return;
     }
 
     drive.state.marks_push();
@@ -752,7 +748,7 @@ fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
         });
         repeat_ctx.last_position = drive.state.string_position;
 
-        return drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
+        drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
             let save_last_position = stacks.max_until_last().save_last_position;
             stacks.repeat_last().last_position = save_last_position;
             if drive.popped_ctx().has_matched == Some(true) {
@@ -767,8 +763,9 @@ fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
 
             drive.next_ctx(1, tail_callback);
         });
+        return;
     }
-    return drive.next_ctx(1, tail_callback);
+    drive.next_ctx(1, tail_callback);
 
     fn tail_callback(drive: &mut StateContext, _stacks: &mut Stacks) {
         /* cannot match more repeated items here.  make sure the
@@ -1052,21 +1049,21 @@ impl ContextDrive for StateContext<'_> {
 }
 
 impl StateContext<'_> {
-    fn next_ctx_from(&mut self, peek: usize, handler: OpcodeHandler) {
-        self.next_ctx(self.peek_code(peek) as usize + 1, handler);
+    fn next_ctx_from(&mut self, peek: usize, handler: OpcodeHandler) -> &mut MatchContext {
+        self.next_ctx(self.peek_code(peek) as usize + 1, handler)
     }
-    fn next_ctx(&mut self, offset: usize, handler: OpcodeHandler) {
-        self.next_ctx_at(self.ctx.code_position + offset, handler);
+    fn next_ctx(&mut self, offset: usize, handler: OpcodeHandler) -> &mut MatchContext {
+        self.next_ctx_at(self.ctx.code_position + offset, handler)
     }
-    fn next_ctx_at(&mut self, code_position: usize, handler: OpcodeHandler) {
+    fn next_ctx_at(&mut self, code_position: usize, handler: OpcodeHandler) -> &mut MatchContext {
         self.next_ctx = Some(MatchContext {
             code_position,
             has_matched: None,
-            toplevel: false,
             handler: None,
             ..self.ctx
         });
         self.ctx.handler = Some(handler);
+        self.next_ctx.as_mut().unwrap()
     }
 
     fn sync_string_position(&mut self) {
