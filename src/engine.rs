@@ -734,8 +734,6 @@ fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
         return;
     }
 
-    drive.state.marks_push();
-
     if ((count as usize) < repeat_ctx.max_count || repeat_ctx.max_count == MAXREPEAT)
         && drive.state.string_position != repeat_ctx.last_position
     {
@@ -747,6 +745,8 @@ fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
             save_last_position: repeat_ctx.last_position,
         });
         repeat_ctx.last_position = drive.state.string_position;
+
+        drive.state.marks_push();
 
         drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
             let save_last_position = stacks.max_until_last().save_last_position;
@@ -774,7 +774,6 @@ fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
             drive.success();
         } else {
             drive.sync_string_position();
-            drive.state.marks_pop_discard();
             drive.failure();
         }
     }
