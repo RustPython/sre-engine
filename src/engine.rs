@@ -151,6 +151,7 @@ impl<'a> State<'a> {
             has_matched: None,
             toplevel: true,
             handler: None,
+            repeat_ctx_id: usize::MAX,
         };
         self.context_stack.push(ctx);
 
@@ -176,6 +177,7 @@ impl<'a> State<'a> {
             has_matched: None,
             toplevel: true,
             handler: None,
+            repeat_ctx_id: usize::MAX,
         };
         self.context_stack.push(ctx);
         self = self._match(&mut stacks);
@@ -194,6 +196,7 @@ impl<'a> State<'a> {
                 has_matched: None,
                 toplevel: false,
                 handler: None,
+                repeat_ctx_id: usize::MAX,
             };
             self.context_stack.push(ctx);
             self = self._match(&mut stacks);
@@ -582,6 +585,7 @@ struct RepeatContext {
     max_count: usize,
     code_position: usize,
     last_position: usize,
+    prev_id: usize,
 }
 
 /* create repeat context.  all the hard work is done
@@ -594,16 +598,18 @@ fn op_repeat(drive: &mut StateContext, stacks: &mut Stacks) {
         max_count: drive.peek_code(3) as usize,
         code_position: drive.ctx.code_position,
         last_position: std::usize::MAX,
+        prev_id: drive.ctx.repeat_ctx_id,
     };
 
     stacks.repeat.push(repeat_ctx);
 
     drive.sync_string_position();
 
-    drive.next_ctx_from(1, |drive, stacks| {
+    let next_ctx = drive.next_ctx_from(1, |drive, stacks| {
         drive.ctx.has_matched = drive.popped_ctx().has_matched;
         stacks.repeat.pop();
     });
+    next_ctx.repeat_ctx_id = stacks.repeat.len() - 1;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -704,28 +710,33 @@ fn op_min_until(drive: &mut StateContext, stacks: &mut Stacks) {
 
 #[derive(Debug, Clone, Copy)]
 struct MaxUntilContext {
-    count: isize,
+    // count: isize,
+    // save_repeat_ctx: Option<RepeatContext>,
     save_last_position: usize,
 }
 
 /* maximizing repeat */
 fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
-    let repeat_ctx = stacks.repeat.last_mut().unwrap();
+    // let repeat_ctx = stacks.repeat.last_mut().unwrap();
+    let repeat_ctx = &mut stacks.repeat[drive.ctx.repeat_ctx_id];
 
     drive.sync_string_position();
 
-    let count = repeat_ctx.count + 1;
+    repeat_ctx.count += 1;
 
-    if (count as usize) < repeat_ctx.min_count {
+    // let count = repeat_ctx.count + 1;
+
+    if (repeat_ctx.count as usize) < repeat_ctx.min_count {
         // not enough matches
-        repeat_ctx.count = count;
+        // repeat_ctx.count = count;
         drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
             if drive.popped_ctx().has_matched == Some(true) {
                 // stacks.max_until.pop();
                 drive.success();
             } else {
                 // let count = stacks.max_until_last().count;
-                stacks.repeat_last().count -= 1;
+                // stacks.repeat_last().count -= 1;
+                stacks.repeat[drive.ctx.repeat_ctx_id].count -= 1;
                 drive.sync_string_position();
                 // stacks.max_until.pop();
                 drive.failure();
@@ -734,42 +745,60 @@ fn op_max_until(drive: &mut StateContext, stacks: &mut Stacks) {
         return;
     }
 
-    if ((count as usize) < repeat_ctx.max_count || repeat_ctx.max_count == MAXREPEAT)
+    stacks.max_until.push(MaxUntilContext {
+        // count,
+        // save_repeat_ctx: None,
+        save_last_position: repeat_ctx.last_position,
+    });
+
+    if ((repeat_ctx.count as usize) < repeat_ctx.max_count || repeat_ctx.max_count == MAXREPEAT)
         && drive.state.string_position != repeat_ctx.last_position
     {
         /* we may have enough matches, but if we can
         match another item, do so */
-        repeat_ctx.count = count;
-        stacks.max_until.push(MaxUntilContext {
-            count,
-            save_last_position: repeat_ctx.last_position,
-        });
+        // repeat_ctx.count = count;
         repeat_ctx.last_position = drive.state.string_position;
 
         drive.state.marks_push();
 
         drive.next_ctx_at(repeat_ctx.code_position + 4, |drive, stacks| {
             let save_last_position = stacks.max_until_last().save_last_position;
-            stacks.repeat_last().last_position = save_last_position;
+            // stacks.repeat_last().last_position = save_last_position;
+            let repeat_ctx = &mut stacks.repeat[drive.ctx.repeat_ctx_id];
+            repeat_ctx.last_position = save_last_position;
             if drive.popped_ctx().has_matched == Some(true) {
                 drive.state.marks_pop_discard();
                 stacks.max_until.pop();
                 return drive.success();
             }
             drive.state.marks_pop();
-            let count = stacks.max_until_last().count;
-            stacks.repeat_last().count = count - 1;
+            // let count = stacks.max_until_last().count;
+            // stacks.repeat_last().count = count - 1;
+            // stacks.repeat_last().count -= 1;
+            repeat_ctx.count -= 1;
             drive.sync_string_position();
 
-            drive.next_ctx(1, tail_callback);
+            // stacks.max_until_last().save_repeat_ctx = stacks.repeat.pop();
+            let next_ctx = drive.next_ctx(1, tail_callback);
+            next_ctx.repeat_ctx_id = repeat_ctx.prev_id;
         });
         return;
     }
-    drive.next_ctx(1, tail_callback);
 
-    fn tail_callback(drive: &mut StateContext, _stacks: &mut Stacks) {
-        /* cannot match more repeated items here.  make sure the
-        tail matches */
+    /* cannot match more repeated items here.  make sure the
+    tail matches */
+    // stacks.max_until_last().save_repeat_ctx = stacks.repeat.pop();
+    let next_ctx = drive.next_ctx(1, tail_callback);
+    next_ctx.repeat_ctx_id = repeat_ctx.prev_id;
+
+    fn tail_callback(drive: &mut StateContext, stacks: &mut Stacks) {
+        // if let Some(save_repeat_ctx) = stacks.max_until_last().save_repeat_ctx {
+        //     stacks.repeat.push(save_repeat_ctx);
+        // }
+        // let save_repeat_ctx = stacks.max_until_last().save_repeat_ctx.unwrap();
+        // stacks.repeat.push(save_repeat_ctx);
+        stacks.max_until.pop();
+
         if drive.popped_ctx().has_matched == Some(true) {
             drive.success();
         } else {
@@ -913,6 +942,7 @@ struct MatchContext {
     has_matched: Option<bool>,
     toplevel: bool,
     handler: Option<OpcodeHandler>,
+    repeat_ctx_id: usize,
 }
 
 impl std::fmt::Debug for MatchContext {
