@@ -101,6 +101,7 @@ pub enum SreCatCode {
     UNI_NOT_LINEBREAK = 17,
 }
 bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct SreFlag: u16 {
         const TEMPLATE = 1;
         const IGNORECASE = 2;
